@@ -1,160 +1,192 @@
-import os
 import io
+import time
+import base64
 import streamlit as st
 from google import genai
 from google.genai import types
 
-st.set_page_config(page_title="Gemini Starter (Text & Vision)", layout="wide")
-st.title("🧪 Gemini Starter — Text & Vision")
-st.caption("Masukkan API key, pilih model, lalu coba Text & Vision (gambar).")
+st.set_page_config(page_title="Gemini Playground — AI Studio Style", layout="wide")
 
-# ---- Sidebar ----
+# ----------------- Styles (AI Studio–ish) -----------------
+st.markdown('''
+<style>
+:root {
+  --card-bg: #0f1115;
+  --border: #23262d;
+}
+/* Make it feel like a tidy IDE/playground */
+.block-container {padding-top: 1.5rem; padding-bottom: 3rem; max-width: 1200px;}
+.sidebar .sidebar-content {background: var(--card-bg);}
+/* Cards */
+.card {border:1px solid var(--border); border-radius:16px; padding:16px; background:#0b0d11;}
+.card-title {font-weight:700; font-size:1rem; opacity:.9; margin-bottom:.5rem;}
+/* Prompt textarea */
+textarea {font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;}
+/* Tiny badge */
+.badge {display:inline-block; border:1px solid var(--border); padding:2px 8px; border-radius:999px; font-size:.75rem; opacity:.8;}
+/* Copy btn mimic */
+.copy {cursor:pointer; border:1px solid var(--border); padding:4px 10px; border-radius:8px; font-size:.8rem;}
+/* Tabs looks a bit tighter */
+.stTabs [data-baseweb="tab-list"] {gap:.5rem;}
+/* Tables monospace */
+code, pre {font-size: .85rem;}
+</style>
+''', unsafe_allow_html=True)
+
+# ----------------- Sidebar -----------------
 with st.sidebar:
     st.header("🔑 API & Model")
     api_key = st.text_input("Gemini API Key", type="password", placeholder="AI...")
-    model = st.selectbox(
-        "Model",
-        [
-            "gemini-1.5-flash",
-            "gemini-1.5-pro",
-        ],
-        index=0
+    model = st.selectbox("Model", ["gemini-1.5-flash", "gemini-1.5-pro"], index=0)
+    st.markdown("---")
+
+    st.subheader("⚙️ Generation Config")
+    temperature = st.slider("temperature", 0.0, 2.0, 0.9, 0.1, help="Kontrol kreativitas")
+    top_p = st.slider("top_p", 0.0, 1.0, 0.95, 0.05)
+    top_k = st.slider("top_k", 0, 100, 40, 1)
+    max_tokens = st.slider("max_output_tokens", 64, 4096, 1024, 64)
+    st.markdown("---")
+
+    st.subheader("🧭 System Instruction (opsional)")
+    system_instruction = st.text_area(
+        "Arahan sistem",
+        value="Kamu adalah asisten yang ringkas, jelas, dan membantu.",
+        height=90
     )
     st.markdown("---")
-    st.subheader("⚙️ Output Mode")
-    as_json = st.toggle("Response sebagai JSON (application/json)", value=False)
-    st.caption("Aktifkan jika kamu ingin output dalam format JSON.")
+    if st.button("🔁 Reset Sesi"):
+        for k in list(st.session_state.keys()):
+            del st.session_state[k]
+        st.rerun()
 
-    st.markdown("---")
-    st.subheader("ℹ️ Tips")
-    st.write(
-        "- Model *flash* lebih cepat dan murah, cocok untuk iterasi cepat.\n"
-        "- Model *pro* lebih akurat untuk tugas kompleks.\n"
-        "- Vision: kamu bisa unggah gambar lalu beri instruksi."
-    )
+if "messages" not in st.session_state:
+    st.session_state.messages = []  # list of dicts: {"role": "user"/"model", "content": "..."}
+if "attachments" not in st.session_state:
+    st.session_state.attachments = []  # list of (bytes, mime)
 
-if not api_key:
-    st.info("Masukkan API key di sidebar untuk mulai.", icon="🔐")
-    st.stop()
+st.title("⚗️ Gemini Playground (AI Studio–like)")
 
-client = genai.Client(api_key=api_key)
+# ----------------- Tabs -----------------
+tab_play, tab_json = st.tabs(["🧪 Playground", "📦 Request/Response"])
 
-tab_text, tab_vision, tab_json = st.tabs(["💬 Text", "🖼️ Vision (Image + Prompt)", "🧱 JSON Mode"])
+with tab_play:
+    colL, colR = st.columns([7,5], gap="large")
 
-# ---------- TEXT ----------
-with tab_text:
-    st.subheader("Text Generation")
-    prompt = st.text_area("Prompt", value="Tuliskan 5 ide video YouTube bertema hewan lucu.", height=150)
-    max_output = st.slider("Max output tokens", 256, 2048, 1024, step=128)
-    if st.button("Generate Teks", type="primary"):
-        try:
-            response = client.models.generate_content(
-                model=model,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    max_output_tokens=max_output,
-                    # kamu bisa tambahkan safety_settings atau system_instruction di sini
-                )
-            )
-            st.success("Berhasil generate!")
-            st.markdown(response.text or "_(kosong)_")
-        except Exception as e:
-            st.error(f"Error: {e}")
+    with colL:
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.markdown('<div class="card-title">Prompt</div>', unsafe_allow_html=True)
+        user_prompt = st.text_area(" ", placeholder="Tulis prompt kamu di sini...", label_visibility="collapsed", height=180)
 
-# ---------- VISION ----------
-with tab_vision:
-    st.subheader("Vision: Gambar + Prompt")
-    uploaded = st.file_uploader("Unggah Gambar (PNG/JPG/WebP)", type=["png","jpg","jpeg","webp"])
-    vision_prompt = st.text_area("Instruksi/pertanyaan untuk gambar", value="Jelaskan isi gambar secara rinci dan buat 3 caption alternatif.", height=120)
-    col1, col2 = st.columns(2)
-    with col1:
-        max_output_v = st.slider("Max output tokens (Vision)", 256, 2048, 1024, step=128, key="maxoutv")
-    with col2:
-        mime_hint = st.text_input("MIME type override (opsional)", value="", placeholder="contoh: image/png")
+        att_col1, att_col2 = st.columns([1,3])
+        with att_col1:
+            add_img = st.checkbox("➕ Tambah gambar", value=False)
+        img_bytes = None
+        mime_override = ""
+        if add_img:
+            up = st.file_uploader("Upload gambar (opsional)", type=["png","jpg","jpeg","webp"])
+            mime_override = st.text_input("MIME override (opsional)", placeholder="image/png")
+            if up is not None:
+                img_bytes = up.read()
+                st.image(io.BytesIO(img_bytes), caption="Attachment", use_container_width=True)
 
-    if st.button("Analisis Gambar", type="primary"):
-        if not uploaded:
-            st.warning("Mohon unggah gambar terlebih dahulu.")
-        else:
-            try:
-                img_bytes = uploaded.read()
-                mime_type = mime_hint.strip() or uploaded.type or "image/png"
-                img_part = types.Part.from_bytes(img_bytes, mime_type=mime_type)
-                text_part = types.Part.from_text(vision_prompt)
+        colA, colB = st.columns([1,1])
+        with colA:
+            run_btn = st.button("▶️ Jalankan", type="primary")
+        with colB:
+            clear_btn = st.button("🧹 Bersihkan Chat")
+            if clear_btn:
+                st.session_state.messages = []
+                st.session_state.attachments = []
 
-                response = client.models.generate_content(
-                    model=model,
-                    contents=[img_part, text_part],
-                    config=types.GenerateContentConfig(
-                        max_output_tokens=max_output_v,
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        if run_btn:
+            if not api_key:
+                st.warning("Masukkan API key di sidebar.", icon="🔐")
+            elif not user_prompt and img_bytes is None:
+                st.info("Isi prompt atau tambahkan gambar terlebih dahulu.", icon="📝")
+            else:
+                try:
+                    client = genai.Client(api_key=api_key)
+                    parts = []
+                    if img_bytes is not None:
+                        mime = mime_override.strip() or "image/png"
+                        parts.append(types.Part.from_bytes(img_bytes, mime_type=mime))
+                    if user_prompt.strip():
+                        parts.append(types.Part.from_text(user_prompt))
+
+                    config = types.GenerateContentConfig(
+                        temperature=temperature,
+                        top_p=top_p,
+                        top_k=top_k,
+                        max_output_tokens=max_tokens,
+                        system_instruction=system_instruction or None
                     )
-                )
-                st.success("Analisis selesai!")
-                st.image(io.BytesIO(img_bytes), caption="Gambar yang diunggah", use_container_width=True)
-                st.markdown("### Hasil")
-                st.markdown(response.text or "_(kosong)_")
-            except Exception as e:
-                st.error(f"Error: {e}")
 
-# ---------- JSON MODE ----------
+                    resp = client.models.generate_content(
+                        model=model,
+                        contents=parts if parts else [types.Part.from_text(user_prompt)],
+                        config=config
+                    )
+
+                    # Save turn
+                    st.session_state.messages.append({"role": "user", "content": user_prompt})
+                    if img_bytes:
+                        st.session_state.attachments.append({"mime": mime_override.strip() or "image/png", "size": len(img_bytes)})
+                    st.session_state.messages.append({"role": "model", "content": resp.text or ""})
+                    st.session_state.last_response = getattr(resp, "raw", None) or getattr(resp, "candidates", None)
+
+                except Exception as e:
+                    st.error(f"Error: {e}")
+
+        # Render conversation
+        if st.session_state.messages:
+            st.markdown("### Riwayat")
+            for i, m in enumerate(st.session_state.messages):
+                who = "👤" if m["role"] == "user" else "🤖"
+                st.markdown(f"**{who} {m['role'].capitalize()}**")
+                st.markdown(m["content"] or "_(kosong)_")
+                st.markdown("---")
+
+    with colR:
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.markdown('<div class="card-title">Hasil Terakhir</div>', unsafe_allow_html=True)
+        last = None
+        for m in reversed(st.session_state.messages):
+            if m["role"] == "model":
+                last = m["content"]
+                break
+        if last:
+            st.markdown(last)
+            if st.button("📋 Copy Hasil"):
+                st.toast("Disalin ke clipboard (Ctrl/Cmd+C di area terpilih).")
+        else:
+            st.caption("Belum ada output.")
+        st.markdown("</div>", unsafe_allow_html=True)
+
 with tab_json:
-    st.subheader("Response JSON (schema opsional)")
-    st.caption("Set 'Response sebagai JSON' di sidebar jika ingin MIME type JSON. "
-               "Kalau tidak, hasil tetap teks biasa.")
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown('<div class="card-title">Request Preview</div>', unsafe_allow_html=True)
+    preview = {
+        "model": model,
+        "config": {
+            "temperature": temperature,
+            "top_p": top_p,
+            "top_k": top_k,
+            "max_output_tokens": max_tokens,
+            "system_instruction": (system_instruction[:120] + "…") if system_instruction else None,
+        },
+        "attachments_count": len(st.session_state.attachments),
+        "turns": [{"role": m["role"], "content_len": len(m["content"])} for m in st.session_state.messages]
+    }
+    st.code(preview, language="json")
 
-    json_prompt = st.text_area(
-        "Prompt (minta hasil berupa struktur data)",
-        value="Buatkan daftar 3 ide konten: judul, target audiens, dan 3 poin utama.",
-        height=140
-    )
-
-    schema_hint = st.text_area(
-        "Skema JSON (opsional, untuk memberi contoh bentuk)",
-        value='''{
-  "ideas": [
-    {"title": "", "audience": "", "bullets": ["", "", ""]}
-  ]
-}''',
-        height=160
-    )
-
-    max_output_j = st.slider("Max output tokens (JSON)", 256, 4096, 1024, step=128, key="maxoutj")
-
-    if st.button("Generate JSON", type="primary"):
-        try:
-            config = types.GenerateContentConfig(max_output_tokens=max_output_j)
-            if as_json:
-                # Set MIME type ke JSON untuk mendorong output JSON
-                config.response_mime_type = "application/json"
-
-            contents = [json_prompt]
-            # Beri contoh skema sebagai conditioning (opsional)
-            if schema_hint.strip():
-                contents = [
-                    types.Part.from_text("Keluarkan persis JSON valid mengikuti bentuk berikut tanpa komentar:"),
-                    types.Part.from_text(schema_hint),
-                    types.Part.from_text("Sekarang isi dengan data yang relevan untuk prompt berikut."),
-                    types.Part.from_text(json_prompt),
-                ]
-
-            response = client.models.generate_content(
-                model=model,
-                contents=contents,
-                config=config
-            )
-
-            st.success("Berhasil!")
-            output = response.text or "{}"
-            # Coba parse agar rapi, kalau gagal tampilkan apa adanya
-            try:
-                # Bersihkan code fences ```json
-                cleaned = output.strip()
-                if cleaned.startswith("```"):
-                    cleaned = cleaned.strip("`")
-                    cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned
-                parsed = __import__("json").loads(cleaned)
-                st.json(parsed)
-            except Exception:
-                st.code(output, language="json")
-        except Exception as e:
-            st.error(f"Error: {e}")
+    st.markdown("---")
+    st.markdown('<div class="card-title">Response Object (mentah)</div>', unsafe_allow_html=True)
+    raw = st.session_state.get("last_response", None)
+    if raw is not None:
+        # We don't know exact python type – just render repr to give raw feel
+        st.code(repr(raw)[:10000])
+    else:
+        st.caption("Belum ada response mentah untuk ditampilkan.")
+    st.markdown("</div>", unsafe_allow_html=True)
